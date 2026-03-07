@@ -45,6 +45,6 @@ jobs:
           cd extractor
           cargo run --release -- ../target/release/crabloader.exe ../bin/crabloader.bin
           cd -
-      - uses: actions/upload-artifact@v6
+      - uses: actions/upload-artifact@v7
         with:
           path: bin/
