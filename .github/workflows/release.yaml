@@ -1,0 +1,49 @@
+---
+name: Build artefacts and create release
+on: 
+  push:
+    branches:
+      - master
+    paths-ignore:
+      - "README.md"
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      attestations: write
+      contents: write
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v6
+      # Why am I doing this instead of just rebuilding?
+      - name: Create release
+        run: |
+          mkdir artefacts
+          cd artefacts
+
+          # Get the last merged PR
+          export PR_NUMBER=$(gh pr list --state merged --limit 1 --json number --jq '.[].number')
+          if [[ -z "${PR_NUMBER}" ]]; then
+            echo "No PR number found."
+            exit 1
+          fi
+
+          # Parse the workflow ID from the PR check link
+          export WORKFLOW_ID=$(gh pr checks "${PR_NUMBER}" --json link --jq '.[].link' | head -n1 | awk -F '/' '{print $8}')
+
+          if [[ -z "${WORKFLOW_ID}" ]]; then
+            echo "No workflow ID found."
+            exit 1
+          fi
+          
+          # Download artefacts
+          echo "Downloading artefacts from workflow ${WORKFLOW_ID}" 
+          gh run download "${WORKFLOW_ID}"
+          cd artifact
+
+          export DATE=$(date +"%Y%m%d")
+
+          zip "CrabLoader-v${DATE}.zip" ./*
+          gh release create "v${DATE}" --generate-notes --fail-on-no-commits --latest --target master "CrabLoader-v${DATE}.zip"

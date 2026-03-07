@@ -1,0 +1,4 @@
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+single_line_if_else_max_width = 80
+wrap_comments = true

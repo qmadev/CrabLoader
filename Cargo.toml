@@ -1,0 +1,19 @@
+[package]
+name = "crabloader"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+
+[profile.dev]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "s"
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+opt-level = "s"
+strip = "symbols"
