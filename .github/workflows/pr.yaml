@@ -1,0 +1,50 @@
+---
+name: Pull Request Tests
+on:
+  pull_request:
+    branches:
+      - "master"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  format:
+    runs-on: "windows-latest"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable,nightly
+          components: rustfmt
+      - run: |
+          cargo +nightly fmt --check
+          cd extractor
+          cargo +nightly fmt --check -- --config-path ../.rustfmt.toml
+  clippy:
+    needs: format
+    runs-on: "windows-latest"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+      - run: |
+          cargo clippy
+          cd extractor
+          cargo clippy
+  build:
+    needs: clippy
+    runs-on: "windows-latest"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - run: |
+          cargo build --release
+          cd extractor
+          cargo run --release -- ../target/release/crabloader.exe ../bin/crabloader.bin
+          cd -
+      - uses: actions/upload-artifact@v6
+        with:
+          path: bin/
