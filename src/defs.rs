@@ -70,7 +70,7 @@ pub type FnVirtualAlloc = extern "C" fn(
     flallocationtype: VIRTUAL_ALLOCATION_TYPE,
     flprotect: PAGE_PROTECTION_FLAGS,
 ) -> *const c_void;
-pub type FnVirtualProtect = extern "C" fn (
+pub type FnVirtualProtect = extern "C" fn(
     lpaddress: usize,
     dwsize: usize,
     flnewprotect: u32,
@@ -78,13 +78,13 @@ pub type FnVirtualProtect = extern "C" fn (
 ) -> bool;
 
 pub const PAGE_NOACCESS: PAGE_PROTECTION_FLAGS = 0x01;
-pub const PAGE_WRITECOPY: PAGE_PROTECTION_FLAGS  = 0x08;
-pub const PAGE_READONLY: PAGE_PROTECTION_FLAGS  = 0x02;
-pub const PAGE_READWRITE: PAGE_PROTECTION_FLAGS  = 0x04;
-pub const PAGE_EXECUTE: PAGE_PROTECTION_FLAGS  = 0x10;
-pub const PAGE_EXECUTE_WRITECOPY: PAGE_PROTECTION_FLAGS  = 0x80;
-pub const PAGE_EXECUTE_READ: PAGE_PROTECTION_FLAGS  = 0x20;
-pub const PAGE_EXECUTE_READWRITE: PAGE_PROTECTION_FLAGS  = 0x40;
+pub const PAGE_WRITECOPY: PAGE_PROTECTION_FLAGS = 0x08;
+pub const PAGE_READONLY: PAGE_PROTECTION_FLAGS = 0x02;
+pub const PAGE_READWRITE: PAGE_PROTECTION_FLAGS = 0x04;
+pub const PAGE_EXECUTE: PAGE_PROTECTION_FLAGS = 0x10;
+pub const PAGE_EXECUTE_WRITECOPY: PAGE_PROTECTION_FLAGS = 0x80;
+pub const PAGE_EXECUTE_READ: PAGE_PROTECTION_FLAGS = 0x20;
+pub const PAGE_EXECUTE_READWRITE: PAGE_PROTECTION_FLAGS = 0x40;
 pub const PAGE_NOCACHE: PAGE_PROTECTION_FLAGS = 0x200;
 
 pub const IMAGE_SCN_MEM_EXECUTE: u32 = 0x20000000;
@@ -93,13 +93,18 @@ pub const IMAGE_SCN_MEM_WRITE: u32 = 0x80000000;
 pub const IMAGE_SCN_MEM_NOT_CACHED: u32 = 0x04000000;
 
 // Stolen from MemoryModule.
-pub const PROTECTION_FLAGS: [[[u32; 2]; 2]; 2] = [
+// using static and link_section seems to make this
+// somewhat more reliable in terms if getting it into
+// the .text section.
+#[unsafe(link_section = ".text$y")]
+pub static PROTECTION_FLAGS: [[[u32; 2]; 2]; 2] = [
     [
         [PAGE_NOACCESS, PAGE_WRITECOPY],
         [PAGE_READONLY, PAGE_READWRITE],
-    ], [
+    ],
+    [
         [PAGE_EXECUTE, PAGE_EXECUTE_WRITECOPY],
-        [PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE]
+        [PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE],
     ],
 ];
 

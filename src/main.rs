@@ -7,9 +7,10 @@
 use core::mem;
 
 use crate::defs::{
-    DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH, GETPROCADDRESS, IMAGE_DOS_HEADER, KERNEL32, LOADLIBRARY, P_LDREND, PEB, VIRTUALALLOC, VIRTUALPROTECT
+    DLL_PROCESS_ATTACH, DLL_PROCESS_DETACH, GETPROCADDRESS, IMAGE_DOS_HEADER, KERNEL32,
+    LOADLIBRARY, P_LDREND, PEB, VIRTUALALLOC, VIRTUALPROTECT,
 };
-use crate::loader::{PE, find_module, fix_image_base, get_peb_addr, remap_pe, resolve_imports};
+use crate::loader::*;
 
 mod defs;
 mod loader;
@@ -30,42 +31,40 @@ pub extern "C" fn ldrmain() -> i32 {
 
             let z = ptr.add(1);
             if *z == 0x5A {
-                break
-            } 
-
+                break;
+            }
         }
     }
 
     let pe_to_load = ptr as *const IMAGE_DOS_HEADER;
 
     let peb = get_peb_addr() as *const PEB;
-    let kernel32 = PE::initialize(find_module(peb, KERNEL32) as *const IMAGE_DOS_HEADER);
-    let virtual_alloc_ptr = kernel32.find_export(VIRTUALALLOC);
-    let load_library_ptr = kernel32.find_export(LOADLIBRARY);
-    let get_proc_address_ptr = kernel32.find_export(GETPROCADDRESS);
-    let virtual_protect_ptr = kernel32.find_export(VIRTUALPROTECT);
+    // let kernel32 = PE::initialize(find_module(peb, KERNEL32) as *const
+    // IMAGE_DOS_HEADER);
+    let kernel32 = find_module(peb, KERNEL32) as *const IMAGE_DOS_HEADER;
+    let virtual_alloc_ptr = find_export(kernel32, VIRTUALALLOC);
+    let load_library_ptr = find_export(kernel32, LOADLIBRARY);
+    let get_proc_address_ptr = find_export(kernel32, GETPROCADDRESS);
+    let virtual_protect_ptr = find_export(kernel32, VIRTUALPROTECT);
 
-    let pe = PE::initialize(pe_to_load);
+    let mapped_pe = remap_pe(pe_to_load, virtual_alloc_ptr);
+    relocate_pe(mapped_pe);
+    resolve_imports(mapped_pe, load_library_ptr, get_proc_address_ptr);
+    execute_tls(mapped_pe);
+    if !finalize_sections(mapped_pe, virtual_protect_ptr) {
+        return 1;
+    }
 
-    let mapped_pe = remap_pe(&pe, virtual_alloc_ptr);
+    let aop = get_aop(mapped_pe);
+    let entry = mapped_pe as usize + aop;
+    // let call = unsafe { mem::transmute::<usize, extern "C" fn(usize, u32,
+    // usize) -> i32>(entry) };
+    let call = unsafe { mem::transmute::<usize, fn()>(entry) };
+    call();
+    return 0;
 
-    mapped_pe.relocate_pe();
-
-    resolve_imports(
-        &mapped_pe,
-        load_library_ptr,
-        get_proc_address_ptr,
-    );
-
-    mapped_pe.execute_tls();
-    mapped_pe.finalize_sections(virtual_protect_ptr);
-
-    fix_image_base(peb, &mapped_pe);
-    let entry = mapped_pe.base + mapped_pe.aop as usize;
-    let call = unsafe { mem::transmute::<usize, extern "C" fn(usize, u32, usize) -> i32>(entry) };
-
-    call(mapped_pe.base, DLL_PROCESS_ATTACH, 0);
-    call(mapped_pe.base, DLL_PROCESS_DETACH, 0)
+    // call(mapped_pe.base, DLL_PROCESS_ATTACH, 0);
+    // call(mapped_pe.base, DLL_PROCESS_DETACH, 0)
 }
 
 #[cfg(debug_assertions)]
