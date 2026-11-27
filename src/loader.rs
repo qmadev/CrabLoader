@@ -43,13 +43,16 @@ pub fn get_peb_addr() -> u64 {
     peb_addr
 }
 
-pub fn remap_pe(pe: &PE, virtual_alloc_ptr: *const ()) -> PE {
-    let optional_header = unsafe { *pe.optional };
+pub fn remap_pe(
+    base: *const IMAGE_DOS_HEADER,
+    virtual_alloc_ptr: *const (),
+) -> *const IMAGE_DOS_HEADER {
+    let nt = get_nt(base);
+    let optional_header = unsafe { (get_optional(base)).read_unaligned() };
     let image_size = optional_header.SizeOfImage;
     let headers_size = optional_header.SizeOfHeaders;
-    let secnum = pe.number_of_sections;
-    let relocations = optional_header.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC].VirtualAddress;
-
+    let secnum = get_number_of_sections(base);
+    let relocations = get_data_dir(base, IMAGE_DIRECTORY_ENTRY_BASERELOC).VirtualAddress;
 
     let mem: *const c_void = match relocations {
         0 => call!(
@@ -66,30 +69,37 @@ pub fn remap_pe(pe: &PE, virtual_alloc_ptr: *const ()) -> PE {
             0,
             image_size as usize,
             MEM_COMMIT | MEM_RESERVE,
-            PAGE_EXECUTE_READWRITE
+            PAGE_READWRITE
         ),
     };
 
-    utils::memcpy(mem as *mut u8, pe.base as *const u8, headers_size as usize);
+    utils::memset(mem as *mut u8, 0, image_size as usize);
+    utils::memcpy(mem as *mut u8, base as *const u8, headers_size as usize);
+
+    let sections = slice_from_raw_parts(
+        (nt as usize + size_of::<IMAGE_NT_HEADERS64>()) as *const IMAGE_SECTION_HEADER,
+        secnum,
+    );
 
     for i in 0..secnum {
-        let section = unsafe { (*pe.sections)[i] };
+        let section = sections[i];
         utils::memcpy(
             (mem as usize + section.VirtualAddress as usize) as *mut u8,
-            (pe.base + section.PointerToRawData as usize) as *const u8,
+            (base as usize + section.PointerToRawData as usize) as *const u8,
             section.SizeOfRawData as usize,
         );
-
-
     }
 
-    PE::initialize(mem as *const IMAGE_DOS_HEADER)
+    mem as *const IMAGE_DOS_HEADER
 }
 
-pub fn resolve_imports(pe: &PE, load_library_ptr: *const (), get_proc_address_ptr: *const ()) {
-    let optional = unsafe { *pe.optional };
-    let mut p_image_import_descriptors = (pe.base
-        + optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress as usize)
+pub fn resolve_imports(
+    base: *const IMAGE_DOS_HEADER,
+    load_library_ptr: *const (),
+    get_proc_address_ptr: *const (),
+) {
+    let dir_entry_import = get_data_dir(base, IMAGE_DIRECTORY_ENTRY_IMPORT);
+    let mut p_image_import_descriptors = (base as usize + dir_entry_import.VirtualAddress as usize)
         as *const IMAGE_IMPORT_DESCRIPTOR;
     let mut image_import_descriptors = unsafe { *p_image_import_descriptors };
 
@@ -100,7 +110,7 @@ pub fn resolve_imports(pe: &PE, load_library_ptr: *const (), get_proc_address_pt
             continue;
         }
 
-        let name_ptr = (pe.base + image_import_descriptors.Name as usize) as *const u8;
+        let name_ptr = (base as usize + image_import_descriptors.Name as usize) as *const u8;
         let module_address = call!(FnLoadLibraryA, load_library_ptr, name_ptr);
 
         if module_address as isize == 0 {
@@ -108,12 +118,12 @@ pub fn resolve_imports(pe: &PE, load_library_ptr: *const (), get_proc_address_pt
         };
 
         let mut p_original_first_thunk = unsafe {
-            (pe.base + image_import_descriptors.Anonymous.OriginalFirstThunk as usize)
+            (base as usize + image_import_descriptors.Anonymous.OriginalFirstThunk as usize)
                 as *const IMAGE_THUNK_DATA64
         };
 
-        let mut p_first_thunk =
-            (image_import_descriptors.FirstThunk as usize + pe.base) as *mut IMAGE_THUNK_DATA64;
+        let mut p_first_thunk = (image_import_descriptors.FirstThunk as usize + base as usize)
+            as *mut IMAGE_THUNK_DATA64;
 
         while unsafe { (*p_original_first_thunk).u1.AddressOfData } != 0 {
             let original_first_thunk = unsafe { &*p_original_first_thunk };
@@ -132,7 +142,7 @@ pub fn resolve_imports(pe: &PE, load_library_ptr: *const (), get_proc_address_pt
                 first_thunk.u1.Function = addr;
             } else {
                 let p_import_by_name = unsafe {
-                    (original_first_thunk.u1.AddressOfData + pe.base as u64)
+                    (original_first_thunk.u1.AddressOfData + base as u64)
                         as *const IMAGE_IMPORT_BY_NAME
                 };
                 let import_by_name =
@@ -159,176 +169,177 @@ pub fn resolve_imports(pe: &PE, load_library_ptr: *const (), get_proc_address_pt
     }
 }
 
-pub fn fix_image_base(peb: *const PEB, pe: &PE) {
-    let peb = peb as isize as *mut PEB;
-
-    unsafe { (*peb).Reserved3[1] = pe.base as *mut c_void }
+pub fn get_nt(base: *const IMAGE_DOS_HEADER) -> *const IMAGE_NT_HEADERS64 {
+    let dos = unsafe { *base };
+    return unsafe { base.byte_add(dos.e_lfanew as usize) } as *const IMAGE_NT_HEADERS64;
 }
 
-pub struct PE {
-    pub base: usize,
-    pub nt: *const IMAGE_NT_HEADERS64,
-    pub optional: *const IMAGE_OPTIONAL_HEADER64,
-    pub sections: *const [IMAGE_SECTION_HEADER],
-    pub number_of_sections: usize,
-    pub aop: u32,
+pub fn get_optional(base: *const IMAGE_DOS_HEADER) -> *const IMAGE_OPTIONAL_HEADER64 {
+    let nt = get_nt(base);
+    let a = core::mem::offset_of!(IMAGE_NT_HEADERS64, OptionalHeader);
+    return unsafe { nt.byte_add(a) } as *const IMAGE_OPTIONAL_HEADER64;
 }
 
-impl PE {
-    pub fn initialize(base: *const IMAGE_DOS_HEADER) -> Self {
-        let dos = unsafe { *base };
-        let p_nt = unsafe { base.byte_add(dos.e_lfanew as usize) } as *const IMAGE_NT_HEADERS64;
-        let nt = unsafe { core::ptr::read_unaligned(p_nt) };
+pub fn get_data_dir(base: *const IMAGE_DOS_HEADER, data_dir: usize) -> IMAGE_DATA_DIRECTORY {
+    let p_optional = get_optional(base);
+    let optional = unsafe { p_optional.read_unaligned() };
 
-        let file = &nt.FileHeader;
-        let optional = &nt.OptionalHeader;
-        let number_of_sections = file.NumberOfSections as usize;
-        let sections = slice_from_raw_parts(
-            (p_nt as usize + size_of::<IMAGE_NT_HEADERS64>()) as *const IMAGE_SECTION_HEADER,
-            number_of_sections,
-        );
-        let aop = optional.AddressOfEntryPoint;
+    return optional.DataDirectory[data_dir];
+}
 
-        PE {
-            base: base as usize,
-            nt: p_nt,
-            optional,
-            sections,
-            number_of_sections,
-            aop,
-        }
-    }
+pub fn get_number_of_sections(base: *const IMAGE_DOS_HEADER) -> usize {
+    let nt = unsafe { get_nt(base).read_unaligned() };
 
-    pub fn relocate_pe(&self) -> bool {
-        let nt = unsafe { *self.nt };
-        let optional = unsafe { *self.optional };
-        let delta = (self.base - nt.OptionalHeader.ImageBase as usize) as u64;
-        let mut p_relocations = (optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_BASERELOC]
-            .VirtualAddress as usize
-            + self.base) as *const IMAGE_BASE_RELOCATION;
-        let image_base_relocation_size = core::mem::size_of::<IMAGE_BASE_RELOCATION>();
-        let mut relocations = unsafe { *p_relocations };
+    nt.FileHeader.NumberOfSections as usize
+}
 
-        while relocations.VirtualAddress != 0 {
-            let final_addr = self.base + relocations.VirtualAddress as usize;
-            let info = (p_relocations as usize + image_base_relocation_size) as *const u16;
+pub fn get_aop(base: *const IMAGE_DOS_HEADER) -> usize {
+    let optional = unsafe { get_optional(base).read_unaligned() };
 
-            let num_entries =
-                if (relocations.SizeOfBlock as isize - image_base_relocation_size as isize) < 0 {
-                    return false;
-                } else {
-                    (relocations.SizeOfBlock as usize - image_base_relocation_size) / 2
-                };
+    optional.AddressOfEntryPoint as usize
+}
 
-            for i in 0..num_entries {
-                let entry = unsafe { *((info).add(i)) };
-                let entry_type = (entry >> 12) & 0xF;
-                let offset = entry & 0xFFF;
+pub fn relocate_pe(base: *const IMAGE_DOS_HEADER) -> bool {
+    let optional = unsafe { get_optional(base).read_unaligned() };
+    let delta = (base as usize - optional.ImageBase as usize) as u64;
+    let dir_base_reloc = get_data_dir(base, IMAGE_DIRECTORY_ENTRY_BASERELOC);
+    let mut p_relocations =
+        (dir_base_reloc.VirtualAddress as usize + base as usize) as *const IMAGE_BASE_RELOCATION;
+    let image_base_relocation_size = core::mem::size_of::<IMAGE_BASE_RELOCATION>();
+    let mut relocations = unsafe { *p_relocations };
 
-                match entry_type {
-                    0xA => unsafe {
-                        let ptr = (final_addr as u64 + offset as u64) as *mut u64;
-                        *ptr += delta;
-                    },
-                    _ => continue,
-                }
-            }
+    while relocations.VirtualAddress != 0 {
+        let final_addr = base as usize + relocations.VirtualAddress as usize;
+        let info = (p_relocations as usize + image_base_relocation_size) as *const u16;
 
-            p_relocations = (p_relocations as usize + relocations.SizeOfBlock as usize)
-                as *const IMAGE_BASE_RELOCATION;
-            relocations = unsafe { *p_relocations };
-        }
+        let num_entries =
+            if (relocations.SizeOfBlock as isize - image_base_relocation_size as isize) < 0 {
+                return false;
+            } else {
+                (relocations.SizeOfBlock as usize - image_base_relocation_size) / 2
+            };
 
-        true
-    }
+        for i in 0..num_entries {
+            let entry = unsafe { *((info).add(i)) };
+            let entry_type = (entry >> 12) & 0xF;
+            let offset = entry & 0xFFF;
 
-    pub fn execute_tls(&self) {
-        let optional = unsafe { *self.optional };
-        let tls_dir_entry = optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS];
-
-        if tls_dir_entry.VirtualAddress == 0 {
-            return;
-        }
-
-        let tls = unsafe {
-            *((self.base + tls_dir_entry.VirtualAddress as usize) as *const IMAGE_TLS_DIRECTORY64)
-        };
-        let tls_callbacks = tls.AddressOfCallBacks; // Pointer to array of tls callback functions
-        type image_tls_callback = extern "C" fn(*mut isize, u32, *mut c_void);
-
-        let mut callback = tls_callbacks as *const image_tls_callback;
-        let mut base = self.base as isize;
-
-        if tls_callbacks == 0 {
-            return;
-        };
-
-        #[allow(clippy::fn_to_numeric_cast_with_truncation)]
-        unsafe {
-            while *callback as i32 != 0 {
-                (*callback)(&mut base, DLL_PROCESS_ATTACH, null_mut());
-                callback = callback.add(1);
-            }
-        }
-    }
-
-    pub fn find_export(&self, export: u64) -> *const () {
-        let optional = unsafe { *self.optional };
-        let export_entry = optional.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
-        let p_export_dir = (self.base + export_entry as usize) as *const IMAGE_EXPORT_DIRECTORY;
-        let export_dir = unsafe { &*p_export_dir };
-        let number_of_names = export_dir.NumberOfNames as usize;
-
-        // get names, ordinals, and addresses
-        let names = slice_from_raw_parts(
-            (self.base + export_dir.AddressOfNames as usize) as *const u32,
-            number_of_names,
-        );
-
-        let ordinals = slice_from_raw_parts(
-            (self.base + export_dir.AddressOfNameOrdinals as usize) as *const u16,
-            export_dir.NumberOfFunctions as usize,
-        );
-
-        let addresses = slice_from_raw_parts(
-            (self.base + export_dir.AddressOfFunctions as usize) as *const u32,
-            export_dir.NumberOfFunctions as usize,
-        );
-
-        for name_index in 0..number_of_names {
-            let name = read_C_string(self.base as isize, names[name_index]);
-
-            if djb2(name) == export {
-                let ordinal = ordinals[name_index];
-                let function_pointer = self.base + addresses[ordinal as usize] as usize;
-                return function_pointer as *const();
+            match entry_type {
+                0xA => unsafe {
+                    let ptr = (final_addr as u64 + offset as u64) as *mut u64;
+                    *ptr += delta;
+                },
+                _ => continue,
             }
         }
 
-        core::ptr::null()
+        p_relocations = (p_relocations as usize + relocations.SizeOfBlock as usize)
+            as *const IMAGE_BASE_RELOCATION;
+        relocations = unsafe { *p_relocations };
     }
 
-    pub fn finalize_sections(&self, virtual_protect_ptr: *const ()) {
-        for i in 0..self.number_of_sections {
-            let section = unsafe { (*self.sections)[i] };
-            let executable = (section.Characteristics & IMAGE_SCN_MEM_EXECUTE != 0) as usize;
-            let readable = (section.Characteristics & IMAGE_SCN_MEM_READ != 0) as usize;
-            let writeable = (section.Characteristics & IMAGE_SCN_MEM_WRITE != 0) as usize;
-            let mut protect = PROTECTION_FLAGS[executable][readable][writeable];
-            let mut old_protect = 0u32;
+    true
+}
 
-            if section.Characteristics & IMAGE_SCN_MEM_NOT_CACHED > 0 {
-                protect |= PAGE_NOCACHE;
-            }
+pub fn execute_tls(base: *const IMAGE_DOS_HEADER) {
+    let tls_dir_entry = get_data_dir(base, IMAGE_DIRECTORY_ENTRY_TLS);
 
-            call!(
-                FnVirtualProtect,
-                virtual_protect_ptr,
-                self.base + section.VirtualAddress as usize,
-                section.SizeOfRawData as usize,
-                protect,
-                &mut old_protect
-            );
+    if tls_dir_entry.VirtualAddress == 0 {
+        return;
+    }
+
+    let tls = unsafe {
+        ((base as usize + tls_dir_entry.VirtualAddress as usize) as *const IMAGE_TLS_DIRECTORY64)
+            .read_unaligned()
+    };
+
+    let tls_callbacks = tls.AddressOfCallBacks; // Pointer to array of tls callback functions
+    type image_tls_callback = extern "C" fn(*mut isize, u32, *mut c_void);
+
+    let mut callback = tls_callbacks as *const image_tls_callback;
+    let mut base = base as isize;
+
+    if tls_callbacks == 0 {
+        return;
+    };
+
+    #[allow(clippy::fn_to_numeric_cast_with_truncation)]
+    unsafe {
+        while *callback as i32 != 0 {
+            (*callback)(&mut base, DLL_PROCESS_ATTACH, null_mut());
+            callback = callback.add(1);
         }
     }
+}
+
+pub fn find_export(base: *const IMAGE_DOS_HEADER, export: u64) -> *const () {
+    let export_entry = get_data_dir(base, IMAGE_DIRECTORY_ENTRY_EXPORT).VirtualAddress;
+    let p_export_dir = (base as usize + export_entry as usize) as *const IMAGE_EXPORT_DIRECTORY;
+    let export_dir = unsafe { &*p_export_dir };
+    let number_of_names = export_dir.NumberOfNames as usize;
+
+    // get names, ordinals, and addresses
+    let names = slice_from_raw_parts(
+        (base as usize + export_dir.AddressOfNames as usize) as *const u32,
+        number_of_names,
+    );
+
+    let ordinals = slice_from_raw_parts(
+        (base as usize + export_dir.AddressOfNameOrdinals as usize) as *const u16,
+        export_dir.NumberOfFunctions as usize,
+    );
+
+    let addresses = slice_from_raw_parts(
+        (base as usize + export_dir.AddressOfFunctions as usize) as *const u32,
+        export_dir.NumberOfFunctions as usize,
+    );
+
+    for name_index in 0..number_of_names {
+        let name = read_C_string(base as isize, names[name_index]);
+
+        if djb2(name) == export {
+            let ordinal = ordinals[name_index];
+            let function_pointer = base as usize + addresses[ordinal as usize] as usize;
+            return function_pointer as *const ();
+        }
+    }
+
+    core::ptr::null()
+}
+
+pub fn finalize_sections(base: *const IMAGE_DOS_HEADER, virtual_protect_ptr: *const ()) -> bool {
+    let p_nt = get_nt(base);
+    let number_of_sections = get_number_of_sections(base);
+    let sections = slice_from_raw_parts(
+        (p_nt as usize + size_of::<IMAGE_NT_HEADERS64>()) as *const IMAGE_SECTION_HEADER,
+        number_of_sections,
+    );
+
+    for i in 0..number_of_sections {
+        let section = sections[i];
+        let executable = ((section.Characteristics & IMAGE_SCN_MEM_EXECUTE) != 0) as usize;
+        let readable = ((section.Characteristics & IMAGE_SCN_MEM_READ) != 0) as usize;
+        let writeable = ((section.Characteristics & IMAGE_SCN_MEM_WRITE) != 0) as usize;
+        let mut protect = PROTECTION_FLAGS[executable][readable][writeable];
+        let mut old_protect = 0u32;
+
+        if (section.Characteristics & IMAGE_SCN_MEM_NOT_CACHED) > 0 {
+            protect |= PAGE_NOCACHE;
+        }
+
+        let res = call!(
+            FnVirtualProtect,
+            virtual_protect_ptr,
+            base as usize + section.VirtualAddress as usize,
+            section.SizeOfRawData as usize,
+            protect,
+            &mut old_protect
+        );
+
+        if !res {
+            return false;
+        }
+    }
+
+    true
 }
